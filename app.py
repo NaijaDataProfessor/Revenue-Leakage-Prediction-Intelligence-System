@@ -98,7 +98,7 @@ NUMERIC_DEFAULTS = {
     "billing_adjustment_count": 0,
     "reconciliation_frequency_days": 7,
     "system_integration_score": 8,
-    "operational_exception_count": 0,
+    "operational_exception_count": 1,
     "contract_compliance_score": 90.0,
 }
 
@@ -621,7 +621,12 @@ def build_manual_input() -> pd.DataFrame:
                     "Previous customer disputes", min_value=0, value=0, step=1
                 )
                 prior_payment_defaults = st.number_input(
-                    "Previous payment defaults", min_value=0, value=0, step=1
+                    "Previous payment defaults",
+                    min_value=0,
+                    value=int(NUMERIC_DEFAULTS["prior_payment_defaults"]),
+                    step=1,
+                    format="%d",
+                    help="Whole-number count; default is the rounded dataset mean."
                 )
             with c2:
                 billing_adjustment_count = st.number_input(
@@ -631,7 +636,12 @@ def build_manual_input() -> pd.DataFrame:
                     "Reconciliation frequency (days)", [1, 3, 7, 14, 30], index=2
                 )
                 operational_exception_count = st.number_input(
-                    "Operational exceptions", min_value=0, value=0, step=1
+                    "Operational exceptions",
+                    min_value=0,
+                    value=int(NUMERIC_DEFAULTS["operational_exception_count"]),
+                    step=1,
+                    format="%d",
+                    help="Whole-number count; default is the rounded dataset mean."
                 )
             with c3:
                 system_integration_score = st.slider(
