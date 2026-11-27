@@ -3,14 +3,17 @@ RevenueGuard AI — Predictive Revenue Leakage Intelligence
 Run:
     streamlit run app.py
 
-Expected model:
+Required primary model:
     models/revenueguard_logistic_model.joblib
 or:
     models/revenueguard_logistic_pipeline.joblib
 
-The saved classifier must be the complete fitted preprocessing + Logistic
-Regression pipeline. An optional conditional leakage-amount regressor can be
-placed in models/ when available.
+Optional extended model:
+    models/revenueguard_linear_regression.joblib
+
+Both artifacts must be complete fitted pipelines, including preprocessing.
+The classifier is the primary predictor; the regressor provides an optional
+monetary leakage estimate.
 """
 
 from pathlib import Path
@@ -46,6 +49,7 @@ REGRESSOR_CANDIDATES = [
     MODEL_DIR / "revenueguard_linear_regression.joblib",
     MODEL_DIR / "revenueguard_regression_model.joblib",
     MODEL_DIR / "revenueguard_leakage_amount_model.joblib",
+    BASE_DIR / "revenueguard_linear_regression.joblib",
     BASE_DIR / "revenueguard_regression_model.joblib",
 ]
 
@@ -452,15 +456,21 @@ def validate_feature_frame(data: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]
     return clean, []
 
 
-def make_predictions(data: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    """Run regression prediction and, when available, optional classification."""
+def make_predictions(
+    data: pd.DataFrame,
+    threshold: float,
+    run_classifier: bool = True,
+    run_regressor: bool = False,
+) -> pd.DataFrame:
+    """Run the selected prediction engine(s) and return their outputs."""
     results = data.copy()
 
-    if regressor is not None:
-        amount_predictions = np.asarray(regressor.predict(data), dtype=float)
-        results["predicted_leakage_amount"] = np.maximum(amount_predictions, 0)
-
-    if classifier is not None:
+    if run_classifier:
+        if classifier is None:
+            raise RuntimeError(
+                "The primary classification model is unavailable. "
+                "Add the fitted classifier pipeline to the models/ folder."
+            )
         probabilities = classifier.predict_proba(data)[:, 1]
         predictions = (probabilities >= threshold).astype(int)
         results["leakage_probability"] = probabilities
@@ -474,6 +484,15 @@ def make_predictions(data: pd.DataFrame, threshold: float) -> pd.DataFrame:
             labels=["Low", "Moderate", "High", "Critical"],
             right=False,
         ).astype(str)
+
+    if run_regressor:
+        if regressor is None:
+            raise RuntimeError(
+                "The extended regression model is unavailable. "
+                "Add revenueguard_linear_regression.joblib to models/."
+            )
+        amount_predictions = np.asarray(regressor.predict(data), dtype=float)
+        results["predicted_leakage_amount"] = np.maximum(amount_predictions, 0)
 
     return results
 
@@ -645,39 +664,67 @@ def build_manual_input() -> pd.DataFrame:
     return pd.DataFrame([row], columns=FEATURE_COLUMNS)
 
 
-def show_prediction_result(result: pd.DataFrame) -> None:
+def show_prediction_result(
+    result: pd.DataFrame,
+    primary_mode: str,
+    show_other_model: bool,
+) -> None:
     row = result.iloc[0]
     st.divider()
-    section_heading("📊", "Prediction result", "Regression estimate for the submitted transaction.")
+    section_heading(
+        "📊",
+        "Prediction result",
+        "The selected model is shown first. The companion model is displayed only when requested.",
+    )
 
-    if "predicted_leakage_amount" in result.columns:
-        st.metric(
-            "💸 Predicted revenue leakage amount",
-            money(float(row["predicted_leakage_amount"]))
-        )
-        st.caption(
-            "This is the regression model's estimated leakage amount. "
-            "It is a model estimate, not a confirmed financial loss."
-        )
-
-    if "leakage_probability" in result.columns:
-        a, b, c = st.columns(3)
+    if primary_mode == "Classification":
         probability = float(row["leakage_probability"])
         flagged = int(row["leakage_prediction"]) == 1
+        a, b, c = st.columns(3)
         a.metric("🎯 Leakage probability", f"{probability:.1%}")
         b.metric("🚦 Predicted outcome", "Leakage risk" if flagged else "No leakage")
         c.metric("⚠️ Risk category", str(row["risk_level"]))
 
         if flagged:
             st.warning(
-                "The optional classification model flagged this transaction "
-                "for further review. Verify the underlying records."
+                "The primary classifier flagged this transaction for further review. "
+                "This is a risk signal, not confirmation of a realised loss."
             )
         else:
-            st.info(
-                "The optional classification model did not flag this transaction. "
-                "This does not guarantee that leakage has not occurred."
+            st.success(
+                "The primary classifier did not flag this transaction at the "
+                "selected threshold. This does not guarantee that leakage is absent."
             )
+
+        if show_other_model and "predicted_leakage_amount" in result.columns:
+            st.markdown("#### Extended prediction · Estimated leakage amount")
+            st.metric(
+                "💸 Predicted revenue leakage amount",
+                money(float(row["predicted_leakage_amount"])),
+            )
+            st.caption(
+                "This is the regressor's direct estimate of leakage amount. "
+                "It is not multiplied by the classifier probability."
+            )
+
+    else:
+        st.markdown("#### Extended prediction · Regression estimate")
+        st.metric(
+            "💸 Predicted revenue leakage amount",
+            money(float(row["predicted_leakage_amount"])),
+        )
+        st.caption(
+            "The regression model estimates the leakage amount directly, "
+            "including zero-valued outcomes. This is not a confirmed financial loss."
+        )
+
+        if show_other_model and "leakage_probability" in result.columns:
+            probability = float(row["leakage_probability"])
+            flagged = int(row["leakage_prediction"]) == 1
+            a, b, c = st.columns(3)
+            a.metric("🎯 Companion leakage probability", f"{probability:.1%}")
+            b.metric("🚦 Classifier outcome", "Leakage risk" if flagged else "No leakage")
+            c.metric("⚠️ Classifier risk category", str(row["risk_level"]))
 
     with st.expander("🧾 View submitted transaction data"):
         st.dataframe(result[FEATURE_COLUMNS], use_container_width=True)
@@ -715,25 +762,61 @@ page = st.sidebar.radio(
 st.sidebar.divider()
 st.sidebar.markdown("### 🎛️ Prediction settings")
 
-default_threshold = (
-    saved_threshold if saved_threshold is not None else 0.10
-)
+available_modes = []
 if classifier is not None:
+    available_modes.append("Classification")
+if regressor is not None:
+    available_modes.append("Regression")
+
+if not available_modes:
+    st.sidebar.error("No prediction models are connected.")
+    primary_mode = "Classification"
+else:
+    default_mode_index = 0 if "Classification" in available_modes else 0
+    primary_mode = st.sidebar.radio(
+        "Choose primary prediction",
+        options=available_modes,
+        index=default_mode_index,
+        format_func=lambda mode: (
+            "🎯 Main prediction · Leakage risk"
+            if mode == "Classification"
+            else "💸 Extended prediction · Leakage amount"
+        ),
+        help="Choose which model's result should be prioritised in the prediction output.",
+    )
+
+show_other_model = False
+if len(available_modes) == 2:
+    other_label = (
+        "Also show estimated leakage amount"
+        if primary_mode == "Classification"
+        else "Also show classifier risk result"
+    )
+    show_other_model = st.sidebar.checkbox(
+        other_label,
+        value=False,
+        help="Runs the companion model as well and displays its result below the selected primary prediction.",
+    )
+
+default_threshold = saved_threshold if saved_threshold is not None else 0.10
+if classifier is not None and (
+    primary_mode == "Classification" or show_other_model
+):
     threshold = st.sidebar.slider(
-        "Class 1 threshold",
+        "Classifier decision threshold",
         min_value=0.05,
         max_value=0.95,
         value=float(np.clip(default_threshold, 0.05, 0.95)),
         step=0.01,
         help=(
-            "A lower threshold generally flags more transactions as leakage risk. "
-            "It may increase recall but can also increase false positives."
+            "Applies only to the classification model. A lower threshold generally "
+            "flags more transactions and may increase false positives."
         ),
     )
-    st.sidebar.caption(f"Current threshold: **{threshold:.2f}**")
+    st.sidebar.caption(f"Classifier threshold: **{threshold:.2f}**")
 else:
     threshold = float(default_threshold)
-    st.sidebar.caption("Regression-only mode: no classification threshold.")
+    st.sidebar.caption("Threshold is not used for regression.")
 
 st.sidebar.divider()
 st.sidebar.caption("🔐 Decision-support prototype")
@@ -788,10 +871,10 @@ with st.container():
 # MODEL STATUS
 # =============================================================================
 if classifier is None and regressor is None:
-    st.error("❌ No compatible model could be loaded.")
+    st.error("❌ No compatible prediction model could be loaded.")
     st.warning(
-        "Add your fitted regression pipeline to `models/revenueguard_linear_regression.joblib`. "
-        "The saved artifact must include its fitted preprocessing steps."
+        "Add the fitted classifier pipeline and/or the extended regression "
+        "pipeline to the project's models/ folder."
     )
     if model_error:
         st.code(model_error)
@@ -799,18 +882,19 @@ if classifier is None and regressor is None:
 
 status_cols = st.columns([1, 1, 2])
 with status_cols[0]:
-    if regressor is not None:
-        st.success("🟢 Regression model loaded")
-    else:
-        st.warning("🟡 Regression model not connected")
-with status_cols[1]:
     if classifier is not None:
-        st.success("🟢 Optional classifier loaded")
+        st.success("🟢 Main classifier connected")
     else:
-        st.info("ℹ️ Regression-only mode")
+        st.warning("🟡 Main classifier not connected")
+with status_cols[1]:
+    if regressor is not None:
+        st.success("🟢 Extended regressor connected")
+    else:
+        st.info("ℹ️ Extended regressor not connected")
 with status_cols[2]:
     st.caption(
-        f"Regressor artifact: `{regressor_path.name if regressor_path else 'Not available'}`"
+        f"Classifier: `{classifier_path.name if classifier_path else 'Not available'}`  |  "
+        f"Regressor: `{regressor_path.name if regressor_path else 'Not available'}`"
     )
 
 
@@ -821,17 +905,17 @@ if page == "🏠 Overview":
     section_heading(
         "📌",
         "Revenue intelligence at a glance",
-        "Estimate transaction-level revenue leakage amounts and support financial review."
+        "Classify leakage risk first, then optionally estimate the potential leakage amount."
     )
 
     st.markdown(
         """
         <div class="rg-note">
           <strong>How RevenueGuard AI helps</strong><br>
-          RevenueGuard AI estimates potential revenue leakage amounts from
-          transaction, customer, payment, billing, operational and control data.
-          Use predictions to prioritise investigation; they are not confirmed
-          accounting losses.
+          RevenueGuard AI's main prediction classifies whether a transaction
+          presents revenue leakage risk. Its extended prediction estimates the
+          potential leakage amount. Use both outputs to prioritise investigation;
+          neither output confirms an accounting loss.
         </div>
         """,
         unsafe_allow_html=True,
@@ -840,11 +924,11 @@ if page == "🏠 Overview":
     st.write("")
     m1, m2, m3 = st.columns(3)
     with m1:
-        metric_card("💸", "Prediction objective", "Leakage amount", "Continuous regression estimate")
+        metric_card("🎯", "Main prediction", "Leakage risk", "Classification")
     with m2:
-        metric_card("🧠", "Primary model", "Linear Regression", "Fitted preprocessing + regression pipeline")
+        metric_card("🧠", "Main model", "Logistic Regression", "Primary classification pipeline")
     with m3:
-        metric_card("📥", "Predictor inputs", str(len(FEATURE_COLUMNS)), "Transaction-level features")
+        metric_card("💸", "Extended prediction", "Leakage amount", "Optional regression estimate")
 
     st.write("")
     left, right = st.columns([1.15, 0.85], gap="large")
@@ -852,17 +936,17 @@ if page == "🏠 Overview":
         section_heading("🧭", "How to use RevenueGuard AI")
         st.markdown(
             """
-            **1. 🔎 Single prediction**  
-            Enter one transaction and estimate its potential leakage amount.
+            **1. 🎯 Main prediction**  
+            Classify whether a transaction presents revenue leakage risk.
 
-            **2. 📂 Batch predictions**  
+            **2. 💸 Extended prediction**  
+            Optionally estimate the potential leakage amount for the same transaction.
+
+            **3. 📂 Batch predictions**  
             Upload a CSV containing the 20 required predictor columns.
 
-            **3. 📊 Review estimates**  
-            Prioritise transactions with higher predicted amounts for financial review.
-
             **4. 📋 Validate the records**  
-            Compare estimates with invoices, payments, contracts and operational records.
+            Review model outputs against invoices, payments, contracts and operational records.
             """
         )
     with right:
@@ -872,9 +956,11 @@ if page == "🏠 Overview":
             <div class="rg-card">
               <div style="font-size:1.05rem;font-weight:800;color:#FFFFFF;">🧾 Transaction data</div>
               <div style="color:#9FB5C9;text-align:center;padding:.25rem;">↓</div>
-              <div style="font-size:1.05rem;font-weight:800;color:#FFFFFF;">🧠 Linear Regression pipeline</div>
+              <div style="font-size:1.05rem;font-weight:800;color:#FFFFFF;">🎯 Classification engine</div>
               <div style="color:#9FB5C9;text-align:center;padding:.25rem;">↓</div>
-              <div style="font-size:1.05rem;font-weight:800;color:#55DED8;">💸 Predicted leakage amount</div>
+              <div style="font-size:1.05rem;font-weight:800;color:#55DED8;">🚦 Leakage risk result</div>
+              <div style="color:#9FB5C9;text-align:center;padding:.25rem;">↓ optional</div>
+              <div style="font-size:1.05rem;font-weight:800;color:#FFFFFF;">💸 Regression amount estimate</div>
               <div style="color:#9FB5C9;text-align:center;padding:.25rem;">↓</div>
               <div style="font-size:1.05rem;font-weight:800;color:#FFFFFF;">🔍 Finance / operations review</div>
             </div>
@@ -914,8 +1000,23 @@ elif page == "🔎 Single prediction":
 
     if not manual_data.empty:
         try:
-            prediction = make_predictions(manual_data, threshold)
-            show_prediction_result(prediction)
+            run_classifier = (
+                primary_mode == "Classification" or show_other_model
+            )
+            run_regressor = (
+                primary_mode == "Regression" or show_other_model
+            )
+            prediction = make_predictions(
+                manual_data,
+                threshold,
+                run_classifier=run_classifier,
+                run_regressor=run_regressor,
+            )
+            show_prediction_result(
+                prediction,
+                primary_mode=primary_mode,
+                show_other_model=show_other_model,
+            )
         except Exception as exc:
             st.error(f"Prediction failed: {exc}")
             st.caption(
@@ -927,7 +1028,7 @@ elif page == "📂 Batch predictions":
     section_heading(
         "📂",
         "Batch transaction assessment",
-        "Estimate potential leakage amounts for multiple transactions from one CSV upload."
+        "Run your selected prediction engine on multiple transactions, with an optional companion-model result."
     )
 
     st.markdown(
@@ -970,29 +1071,39 @@ elif page == "📂 Batch predictions":
             else:
                 st.success(f"✅ {len(clean_data):,} transactions ready for scoring.")
 
-                with st.spinner("Estimating revenue leakage amounts..."):
-                    batch_results = make_predictions(clean_data, threshold)
+                run_classifier = (
+                    primary_mode == "Classification" or show_other_model
+                )
+                run_regressor = (
+                    primary_mode == "Regression" or show_other_model
+                )
+
+                with st.spinner("Running selected RevenueGuard AI prediction..."):
+                    batch_results = make_predictions(
+                        clean_data,
+                        threshold,
+                        run_classifier=run_classifier,
+                        run_regressor=run_regressor,
+                    )
 
                 total = len(batch_results)
-                if "predicted_leakage_amount" in batch_results:
-                    predicted_total = float(batch_results["predicted_leakage_amount"].sum())
-                    average_amount = float(batch_results["predicted_leakage_amount"].mean())
-                    k1, k2, k3 = st.columns(3)
-                    k1.metric("📦 Transactions scored", f"{total:,}")
-                    k2.metric("💸 Sum of predicted amounts", money(predicted_total))
-                    k3.metric("📊 Average predicted amount", money(average_amount))
-                else:
-                    st.error("The regression model is not available.")
-
                 if "leakage_probability" in batch_results.columns:
                     flagged = int(batch_results["leakage_prediction"].sum())
                     average_probability = float(batch_results["leakage_probability"].mean())
-                    c1, c2 = st.columns(2)
-                    c1.metric("🚩 Classifier-flagged transactions", f"{flagged:,}")
-                    c2.metric("🎯 Average leakage probability", f"{average_probability:.1%}")
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("📦 Transactions scored", f"{total:,}")
+                    k2.metric("🚩 Classifier-flagged", f"{flagged:,}")
+                    k3.metric("🎯 Average leakage probability", f"{average_probability:.1%}")
+
+                if "predicted_leakage_amount" in batch_results.columns:
+                    predicted_total = float(batch_results["predicted_leakage_amount"].sum())
+                    average_amount = float(batch_results["predicted_leakage_amount"].mean())
+                    a1, a2 = st.columns(2)
+                    a1.metric("💸 Sum of estimated amounts", money(predicted_total))
+                    a2.metric("📊 Average estimated amount", money(average_amount))
 
                 section_heading("📋", "Transaction-level results")
-                display_columns = ["predicted_leakage_amount"]
+                display_columns = []
                 if "leakage_probability" in batch_results.columns:
                     display_columns += [
                         "leakage_probability",
@@ -1000,6 +1111,8 @@ elif page == "📂 Batch predictions":
                         "leakage_status",
                         "risk_level",
                     ]
+                if "predicted_leakage_amount" in batch_results.columns:
+                    display_columns += ["predicted_leakage_amount"]
 
                 display = pd.concat(
                     [
@@ -1014,7 +1127,7 @@ elif page == "📂 Batch predictions":
                 st.download_button(
                     "⬇️ Download prediction results",
                     data=display.to_csv(index=False).encode("utf-8"),
-                    file_name="revenueguard_ai_regression_predictions.csv",
+                    file_name="revenueguard_ai_predictions.csv",
                     mime="text/csv",
                     type="primary",
                 )
@@ -1030,7 +1143,7 @@ elif page == "🧠 About the model":
     section_heading(
         "🧠",
         "Model information",
-        "Understand the regression model, its inputs and deployment details."
+        "Understand the primary classification model and optional extended regression model."
     )
 
     left, right = st.columns([1.1, 0.9], gap="large")
@@ -1038,18 +1151,17 @@ elif page == "🧠 About the model":
         st.markdown(
             """
             <div class="rg-card">
-              <div class="rg-section-label">REGRESSION ENGINE</div>
-              <h3>Linear Regression</h3>
+              <div class="rg-section-label">MAIN PREDICTION ENGINE</div>
+              <h3>Classification · Logistic Regression</h3>
               <p style="color:#B9C8D8;">
-                The fitted regression pipeline estimates a continuous
-                revenue leakage amount from transaction-level predictors.
-                The output is an estimate and should be reviewed against
-                source financial records.
+                The primary classifier estimates the probability that a
+                transaction presents revenue leakage risk and assigns a
+                classification using the selected decision threshold.
               </p>
               <hr>
-              <p><strong>Target:</strong> leakage_amount</p>
-              <p><strong>Output:</strong> Predicted leakage amount</p>
-              <p><strong>Threshold:</strong> Not applicable to regression</p>
+              <p><strong>Target:</strong> revenue_leakage</p>
+              <p><strong>Output:</strong> Leakage risk / no leakage risk</p>
+              <p><strong>Threshold:</strong> Adjustable in the sidebar</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1059,17 +1171,18 @@ elif page == "🧠 About the model":
         st.markdown(
             """
             <div class="rg-card">
-              <div class="rg-section-label">PREDICTOR INPUTS</div>
-              <h3>20 transaction features</h3>
+              <div class="rg-section-label">EXTENDED PREDICTION ENGINE</div>
+              <h3>Regression · Linear Regression</h3>
               <p style="color:#B9C8D8;">
-                Inputs cover transaction value, customer history, sales
-                channels, payment terms, discounts, billing, operations and
-                contract controls.
+                When enabled, the regressor estimates a continuous leakage
+                amount using the same 20 transaction predictors. It can be
+                selected as the primary view or displayed alongside the
+                classification result.
               </p>
               <hr>
-              <p>🧾 Transaction & customer</p>
-              <p>💳 Payment & billing</p>
-              <p>⚙️ Operational controls</p>
+              <p><strong>Target:</strong> leakage_amount</p>
+              <p><strong>Output:</strong> Estimated monetary amount</p>
+              <p><strong>Threshold:</strong> Not applicable to regression</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1078,12 +1191,12 @@ elif page == "🧠 About the model":
     st.write("")
     st.markdown("### 🔧 Deployment details")
     st.write(
-        f"**Regression artifact:** "
-        f"`{regressor_path if regressor_path else 'Not available'}`"
+        f"**Main classifier artifact:** "
+        f"`{classifier_path if classifier_path else 'Not available'}`"
     )
     st.write(
-        f"**Optional classifier artifact:** "
-        f"`{classifier_path if classifier_path else 'Not connected'}`"
+        f"**Extended regressor artifact:** "
+        f"`{regressor_path if regressor_path else 'Not connected'}`"
     )
     st.write(f"**Required predictor count:** `{len(FEATURE_COLUMNS)}`")
 
@@ -1091,9 +1204,10 @@ elif page == "🧠 About the model":
         st.code("\n".join(FEATURE_COLUMNS), language="text")
 
     st.info(
-        "This application currently uses a synthetic-data-trained model. "
-        "Validate performance on representative real business data before "
-        "using predictions for operational or financial decisions."
+        "The classifier is the primary predictor. The regression model is an "
+        "optional extended estimate. Validate both models on representative "
+        "real business data before using predictions for operational or "
+        "financial decisions."
     )
 
     st.markdown("### 👨🏽‍💻 About the creator")
