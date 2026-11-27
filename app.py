@@ -610,8 +610,12 @@ def build_manual_input() -> pd.DataFrame:
             c1, c2, c3 = st.columns(3)
             with c1:
                 delivery_delay_days = st.number_input(
-                    "Delivery delay (days)", min_value=0.0,
-                    value=float(NUMERIC_DEFAULTS["delivery_delay_days"])
+                    "Delivery delay (days)",
+                    min_value=0,
+                    value=int(NUMERIC_DEFAULTS["delivery_delay_days"]),
+                    step=1,
+                    format="%d",
+                    help="Enter a whole number of days."
                 )
                 prior_customer_disputes = st.number_input(
                     "Previous customer disputes", min_value=0, value=0, step=1
@@ -635,8 +639,12 @@ def build_manual_input() -> pd.DataFrame:
                     int(NUMERIC_DEFAULTS["system_integration_score"])
                 )
                 contract_compliance_score = st.slider(
-                    "Contract compliance score", 0.0, 100.0,
-                    float(NUMERIC_DEFAULTS["contract_compliance_score"])
+                    "Contract compliance score",
+                    min_value=0,
+                    max_value=100,
+                    value=int(NUMERIC_DEFAULTS["contract_compliance_score"]),
+                    step=1,
+                    help="Select a whole-number score from 0 to 100."
                 )
 
         submitted = st.form_submit_button(
