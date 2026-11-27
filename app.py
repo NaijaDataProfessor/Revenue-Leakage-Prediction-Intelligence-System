@@ -498,7 +498,8 @@ def make_predictions(
 
 
 def money(value: float) -> str:
-    return f"{value:,.2f}"
+    """Format monetary predictions in Nigerian naira."""
+    return f"₦{value:,.2f}"
 
 
 def section_heading(icon: str, title: str, subtitle: Optional[str] = None) -> None:
@@ -589,12 +590,20 @@ def build_manual_input() -> pd.DataFrame:
                 )
             with c3:
                 approval_delay_hours = st.number_input(
-                    "Approval delay (hours)", min_value=0.0,
-                    value=float(NUMERIC_DEFAULTS["approval_delay_hours"])
+                    "Approval delay (hours)",
+                    min_value=0,
+                    value=int(NUMERIC_DEFAULTS["approval_delay_hours"]),
+                    step=1,
+                    format="%d",
+                    help="Enter a whole number of hours.",
                 )
                 invoice_delay_days = st.number_input(
-                    "Invoice delay (days)", min_value=0.0,
-                    value=float(NUMERIC_DEFAULTS["invoice_delay_days"])
+                    "Invoice delay (days)",
+                    min_value=0,
+                    value=int(NUMERIC_DEFAULTS["invoice_delay_days"]),
+                    step=1,
+                    format="%d",
+                    help="Enter a whole number of days.",
                 )
 
         with tab3:
@@ -762,46 +771,39 @@ page = st.sidebar.radio(
 st.sidebar.divider()
 st.sidebar.markdown("### 🎛️ Prediction settings")
 
-available_modes = []
-if classifier is not None:
-    available_modes.append("Classification")
-if regressor is not None:
-    available_modes.append("Regression")
+st.sidebar.markdown("**Choose prediction outputs**")
 
-if not available_modes:
-    st.sidebar.error("No prediction models are connected.")
-    primary_mode = "Classification"
-else:
-    default_mode_index = 0 if "Classification" in available_modes else 0
-    primary_mode = st.sidebar.radio(
-        "Choose primary prediction",
-        options=available_modes,
-        index=default_mode_index,
-        format_func=lambda mode: (
-            "🎯 Main prediction · Leakage risk"
-            if mode == "Classification"
-            else "💸 Extended prediction · Leakage amount"
-        ),
-        help="Choose which model's result should be prioritised in the prediction output.",
-    )
+main_prediction_enabled = classifier is not None and st.sidebar.checkbox(
+    "🎯 Main prediction · Leakage risk",
+    value=classifier is not None,
+    key="main_prediction_enabled",
+    help="Run the primary classification model to estimate leakage risk.",
+)
 
-show_other_model = False
-if len(available_modes) == 2:
-    other_label = (
-        "Also show estimated leakage amount"
-        if primary_mode == "Classification"
-        else "Also show classifier risk result"
-    )
-    show_other_model = st.sidebar.checkbox(
-        other_label,
-        value=False,
-        help="Runs the companion model as well and displays its result below the selected primary prediction.",
-    )
+extended_prediction_enabled = regressor is not None and st.sidebar.checkbox(
+    "💸 Extended prediction · Leakage amount",
+    value=False,
+    key="extended_prediction_enabled",
+    help="Run the regression model to estimate the potential leakage amount in Nigerian naira.",
+)
+
+if classifier is None:
+    st.sidebar.caption("Main classifier is not connected.")
+if regressor is None:
+    st.sidebar.caption("Extended regressor is not connected.")
+
+if not main_prediction_enabled and not extended_prediction_enabled:
+    st.sidebar.warning("Select at least one prediction output.")
+
+# Preserve a primary display order when both outputs are selected.
+primary_mode = (
+    "Classification" if main_prediction_enabled
+    else "Regression"
+)
+show_other_model = main_prediction_enabled and extended_prediction_enabled
 
 default_threshold = saved_threshold if saved_threshold is not None else 0.10
-if classifier is not None and (
-    primary_mode == "Classification" or show_other_model
-):
+if classifier is not None and main_prediction_enabled:
     threshold = st.sidebar.slider(
         "Classifier decision threshold",
         min_value=0.05,
@@ -1000,12 +1002,8 @@ elif page == "🔎 Single prediction":
 
     if not manual_data.empty:
         try:
-            run_classifier = (
-                primary_mode == "Classification" or show_other_model
-            )
-            run_regressor = (
-                primary_mode == "Regression" or show_other_model
-            )
+            run_classifier = main_prediction_enabled
+            run_regressor = extended_prediction_enabled
             prediction = make_predictions(
                 manual_data,
                 threshold,
@@ -1071,12 +1069,8 @@ elif page == "📂 Batch predictions":
             else:
                 st.success(f"✅ {len(clean_data):,} transactions ready for scoring.")
 
-                run_classifier = (
-                    primary_mode == "Classification" or show_other_model
-                )
-                run_regressor = (
-                    primary_mode == "Regression" or show_other_model
-                )
+                run_classifier = main_prediction_enabled
+                run_regressor = extended_prediction_enabled
 
                 with st.spinner("Running selected RevenueGuard AI prediction..."):
                     batch_results = make_predictions(
@@ -1099,8 +1093,8 @@ elif page == "📂 Batch predictions":
                     predicted_total = float(batch_results["predicted_leakage_amount"].sum())
                     average_amount = float(batch_results["predicted_leakage_amount"].mean())
                     a1, a2 = st.columns(2)
-                    a1.metric("💸 Sum of estimated amounts", money(predicted_total))
-                    a2.metric("📊 Average estimated amount", money(average_amount))
+                    a1.metric("💸 Total estimated leakage (NGN)", money(predicted_total))
+                    a2.metric("📊 Average estimated leakage (NGN)", money(average_amount))
 
                 section_heading("📋", "Transaction-level results")
                 display_columns = []
@@ -1122,7 +1116,19 @@ elif page == "📂 Batch predictions":
                     axis=1,
                 )
 
-                st.dataframe(display, use_container_width=True, height=430)
+                if "predicted_leakage_amount" in display.columns:
+                    display = display.rename(columns={
+                        "predicted_leakage_amount": "predicted_leakage_amount_ngn"
+                    })
+                    st.dataframe(
+                        display.style.format({
+                            "predicted_leakage_amount_ngn": "₦{:,.2f}"
+                        }),
+                        use_container_width=True,
+                        height=430,
+                    )
+                else:
+                    st.dataframe(display, use_container_width=True, height=430)
 
                 st.download_button(
                     "⬇️ Download prediction results",
