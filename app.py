@@ -636,7 +636,7 @@ def build_manual_input() -> pd.DataFrame:
                 )
                 contract_compliance_score = st.slider(
                     "Contract compliance score", 0.0, 100.0,
-                    int(NUMERIC_DEFAULTS["contract_compliance_score"])
+                    float(NUMERIC_DEFAULTS["contract_compliance_score"])
                 )
 
         submitted = st.form_submit_button(
